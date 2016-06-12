@@ -29,14 +29,16 @@ import org.testng.annotations.Test;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
 import java.util.*;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.datastax.driver.core.Assertions.assertThat;
 import static com.datastax.driver.core.CreateCCM.TestMode.PER_METHOD;
-import static com.datastax.driver.core.TestUtils.nonDebouncingQueryOptions;
-import static com.datastax.driver.core.TestUtils.nonQuietClusterCloseOptions;
+import static com.datastax.driver.core.TestUtils.*;
 import static com.google.common.collect.Lists.newArrayList;
 import static org.testng.Assert.*;
 
@@ -313,29 +315,17 @@ public class ControlConnectionTest extends CCMTestsSupport {
     @Test(groups = "unit")
     public void getClusterInfo_should_return_cluster_info() {
         ScassandraCluster scassandra = ScassandraCluster.builder().withNodes(1).build();
-        Cluster cluster = Cluster.builder()
-                .addContactPoints(scassandra.address(1).getAddress())
-                .withPort(scassandra.getBinaryPort())
-                .withNettyOptions(nonQuietClusterCloseOptions)
-                .build();
 
-        try {
-            scassandra.init();
-            cluster.init();
+        new RunClusterAssertion(scassandra) {
+            @Override
+            void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                ClusterInfo clusterInfo = connection.getClusterInfo();
 
-            ControlConnection connection = new ControlConnection(cluster.manager);
-            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().newHost(scassandra.address(1)));
-            connection.connect(contactPoints);
-            ClusterInfo clusterInfo = connection.getClusterInfo();
-
-            assertNotNull(clusterInfo);
-            assertEquals(clusterInfo.clusterName, "scassandra");
-            assertEquals(clusterInfo.partitioner, "org.apache.cassandra.dht.Murmur3Partitioner");
-        }
-        finally {
-            cluster.close();
-            scassandra.stop();
-        }
+                assertNotNull(clusterInfo);
+                assertEquals(clusterInfo.clusterName, "scassandra");
+                assertEquals(clusterInfo.partitioner, "org.apache.cassandra.dht.Murmur3Partitioner");
+            }
+        };
     }
 
     @Test(groups = "unit", expectedExceptions = IllegalStateException.class)
@@ -346,12 +336,7 @@ public class ControlConnectionTest extends CCMTestsSupport {
                 .withNettyOptions(nonQuietClusterCloseOptions)
                 .build();
 
-        try {
-            new ControlConnection(cluster.manager).getClusterInfo();
-        }
-        finally {
-            cluster.close();
-        }
+        new ControlConnection(cluster.manager).getClusterInfo();
     }
 
     @Test(groups = "unit")
@@ -360,38 +345,26 @@ public class ControlConnectionTest extends CCMTestsSupport {
                 .withNodes(1)
                 .forcePeerInfo(1, 1, "release_version", "2.1.8")
                 .build();
-        Cluster cluster = Cluster.builder()
-                .addContactPoints(scassandra.address(1).getAddress())
-                .withPort(scassandra.getBinaryPort())
-                .withNettyOptions(nonQuietClusterCloseOptions)
-                .build();
 
-        try {
-            scassandra.init();
-            cluster.init();
+        new RunClusterAssertion(scassandra) {
+            @Override
+            void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                List<HostInfo> hosts = connection.getHostsInfo();
 
-            ControlConnection connection = new ControlConnection(cluster.manager);
-            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().newHost(scassandra.address(1)));
-            connection.connect(contactPoints);
-            List<HostInfo> hosts = connection.getHostsInfo();
-
-            assertEquals(hosts.size(), 1);
-            HostInfo host = hosts.get(0);
-            assertEquals(host.address, scassandra.address(1));
-            assertEquals(host.version, "2.1.8");
-            assertEquals(host.datacenter, "DC1");
-            assertEquals(host.rack, "rack1");
-            assertEquals(host.broadcastAddress, scassandra.address(1).getAddress());
-            assertEquals(host.listenAddress, scassandra.address(1).getAddress());
-            assertNull(host.dseWorkload);
-            assertFalse(host.isDseGraphEnabled);
-            assertNull(host.dseVersion);
-            assertEquals(host.tokens, Sets.newHashSet("0"));
-        }
-        finally {
-            cluster.close();
-            scassandra.stop();
-        }
+                assertEquals(hosts.size(), 1);
+                HostInfo host = hosts.get(0);
+                assertEquals(host.address, scassandra.address(1));
+                assertEquals(host.version, "2.1.8");
+                assertEquals(host.datacenter, "DC1");
+                assertEquals(host.rack, "rack1");
+                assertEquals(host.broadcastAddress, scassandra.address(1).getAddress());
+                assertEquals(host.listenAddress, scassandra.address(1).getAddress());
+                assertNull(host.dseWorkload);
+                assertFalse(host.isDseGraphEnabled);
+                assertNull(host.dseVersion);
+                assertEquals(host.tokens, Sets.newHashSet("0"));
+            }
+        };
     }
 
     @Test(groups = "unit")
@@ -401,53 +374,178 @@ public class ControlConnectionTest extends CCMTestsSupport {
                 .forcePeerInfo(1, 1, "release_version", "2.1.8")
                 .forcePeerInfo(1, 2, "release_version", "2.1.8")
                 .build();
-        Cluster cluster = Cluster.builder()
-                .addContactPoints(scassandra.address(1).getAddress())
-                .withPort(scassandra.getBinaryPort())
-                .withNettyOptions(nonQuietClusterCloseOptions)
+
+        new RunClusterAssertion(scassandra) {
+            @Override
+            void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                List<HostInfo> hosts = connection.getHostsInfo();
+                //first host is always connected one - lets keep it that way for simplicity
+                assertEquals(hosts.size(), 2);
+
+                HostInfo connectedHost = hosts.get(0);
+                assertEquals(connectedHost.address, scassandra.address(1));
+                assertEquals(connectedHost.version, "2.1.8");
+                assertEquals(connectedHost.datacenter, "DC1");
+                assertEquals(connectedHost.rack, "rack1");
+                assertEquals(connectedHost.broadcastAddress, scassandra.address(1).getAddress());
+                assertEquals(connectedHost.listenAddress, scassandra.address(1).getAddress());
+                assertNull(connectedHost.dseWorkload);
+                assertFalse(connectedHost.isDseGraphEnabled);
+                assertNull(connectedHost.dseVersion);
+                assertEquals(connectedHost.tokens, Sets.newHashSet("0"));
+
+                HostInfo peerHost = hosts.get(1);
+                assertEquals(peerHost.address, scassandra.address(2));
+                assertEquals(peerHost.version, "2.1.8");
+                assertEquals(peerHost.datacenter, "DC1");
+                assertEquals(peerHost.rack, "rack1");
+                assertEquals(peerHost.broadcastAddress, scassandra.address(2).getAddress());
+                //todo listen address is null in scassandra
+                assertNull(peerHost.listenAddress);
+                assertNull(peerHost.dseWorkload);
+                assertFalse(peerHost.isDseGraphEnabled);
+                assertNull(peerHost.dseVersion);
+                assertEquals(peerHost.tokens, Sets.newHashSet("4611686018427387903"));
+            }
+        };
+    }
+
+    @Test(groups = "unit")
+    public void getHosts_should_ignore_peer_with_nulls_in_required_columns() {
+        List<String> nonNullColumns = Arrays.asList(
+                "peer",
+                "rpc_address",
+                "host_id",
+                "data_center",
+                "rack",
+                "tokens");
+        for (String nonNullColumn : nonNullColumns) {
+            ScassandraCluster scassandra = ScassandraCluster.builder()
+                    .withNodes(3)
+                    .forcePeerInfo(1, 2, nonNullColumn, null)
+                    .build();
+            new RunClusterAssertion(scassandra) {
+                @Override
+                void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                    List<HostInfo> hosts = connection.getHostsInfo();
+                    assertEquals(hosts.size(), 2);
+                    assertEquals(hosts.get(0).address, scassandra.address(1));
+                    assertEquals(hosts.get(1).address, scassandra.address(3));
+                }
+            };
+        }
+    }
+
+    @Test(groups = "unit")
+    public void getHosts_should_ignore_peer_with_nulls_in_critical_required_columns_if_extended_peer_check_false() {
+        List<String> requiredColumns = Arrays.asList(
+                "peer",
+                "rpc_address");
+        for (String requiredColumn : requiredColumns) {
+            ScassandraCluster scassandra = ScassandraCluster.builder()
+                    .withNodes(3)
+                    .forcePeerInfo(1, 2, requiredColumn, null)
+                    .build();
+            new RunClusterAssertion(scassandra, new PeerRowValidator(false)) {
+                @Override
+                void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                    List<HostInfo> hosts = connection.getHostsInfo();
+                    assertEquals(hosts.size(), 2);
+                    assertEquals(hosts.get(0).address, scassandra.address(1));
+                    assertEquals(hosts.get(1).address, scassandra.address(3));
+                }
+            };
+        }
+    }
+
+    @Test(groups = "unit")
+    public void getHosts_should_add_peer_with_nulls_in_non_critical_columns_if_extended_peer_check_false() {
+        List<String> nonCriticalRequiredColumns = Arrays.asList(
+                "host_id",
+                "data_center",
+                "rack",
+                "tokens");
+        for (String nonNullColumn : nonCriticalRequiredColumns) {
+            ScassandraCluster scassandra = ScassandraCluster.builder()
+                    .withNodes(3)
+                    .forcePeerInfo(1, 2, nonNullColumn, null)
+                    .build();
+            new RunClusterAssertion(scassandra, new PeerRowValidator(false)) {
+                @Override
+                void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                    List<HostInfo> hosts = connection.getHostsInfo();
+                    assertEquals(hosts.size(), 3);
+                    assertEquals(hosts.get(0).address, scassandra.address(1));
+                    assertEquals(hosts.get(1).address, scassandra.address(2));
+                    assertEquals(hosts.get(2).address, scassandra.address(3));
+                }
+            };
+        }
+    }
+
+    @Test(groups = "unit")
+    public void getHosts_should_add_peer_if_rpc_address_is_bind_all() throws UnknownHostException {
+        ScassandraCluster tmp = ScassandraCluster.builder().withNodes(3).build();
+        ScassandraCluster scassandra = ScassandraCluster.builder()
+                .withNodes(3)
+                .forcePeerInfo(1, 2, "rpc_address", InetAddress.getByAddress(new byte[4]))
                 .build();
+        new RunClusterAssertion(scassandra) {
+            @Override
+            void performAssert(ScassandraCluster scassandra, ControlConnection connection) {
+                List<HostInfo> hosts = connection.getHostsInfo();
+                assertEquals(hosts.size(), 3);
+                assertEquals(hosts.get(0).address, scassandra.address(1));
+                assertEquals(hosts.get(1).address, scassandra.address(2));
+                assertEquals(hosts.get(2).address, scassandra.address(3));
+            }
+        };
+    }
 
-        try {
-            scassandra.init();
-            cluster.init();
+    /**
+     * Utility class to wrap running-closing cluster into try-finally
+     */
+    private abstract static class RunClusterAssertion {
+        RunClusterAssertion(ScassandraCluster scassandra) {
+            this(scassandra, new PeerRowValidator());
+        }
 
-            ControlConnection connection = new ControlConnection(cluster.manager);
-            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().newHost(scassandra.address(1)));
+        RunClusterAssertion(ScassandraCluster scassandra, PeerRowValidator rowValidator) {
+            //calling run right away so that nobody forgets to invoke it
+            run(scassandra, rowValidator);
+        }
+
+        private void run(ScassandraCluster scassandra, PeerRowValidator rowValidator) {
+            Cluster cluster = Cluster.builder()
+                    .addContactPoints(scassandra.address(1).getAddress())
+                    .withPort(scassandra.getBinaryPort())
+                    .withNettyOptions(nonQuietClusterCloseOptions)
+                    .withReconnectionPolicy(new ConstantReconnectionPolicy(3600*1000))
+                    .build();
+
+            ControlConnection connection = null;
+            try {
+                scassandra.init();
+                cluster.init();
+                connection = openConnection(scassandra, cluster, rowValidator);
+                performAssert(scassandra, connection);
+            } finally {
+                cluster.close();
+                scassandra.stop();
+            }
+        }
+
+        ControlConnection openConnection(ScassandraCluster scassandra, Cluster cluster, PeerRowValidator rowValidator) {
+            ControlConnection connection = new ControlConnection(cluster.manager, rowValidator);
+            //todo take existing Host from Metadata otherwise host.convictionPolicy logs exception upon Cluster.close()
+            //because number of closed connections doesn't equal to number of opened ones - seems lack of State update
+            //somewhere
+            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().getHost(scassandra.address(1)));
             connection.connect(contactPoints);
-            List<HostInfo> hosts = connection.getHostsInfo();
-
-            //first host is always connected one - lets keep it that way for simplicity
-            assertEquals(hosts.size(), 2);
-
-            HostInfo connectedHost = hosts.get(0);
-            assertEquals(connectedHost.address, scassandra.address(1));
-            assertEquals(connectedHost.version, "2.1.8");
-            assertEquals(connectedHost.datacenter, "DC1");
-            assertEquals(connectedHost.rack, "rack1");
-            assertEquals(connectedHost.broadcastAddress, scassandra.address(1).getAddress());
-            assertEquals(connectedHost.listenAddress, scassandra.address(1).getAddress());
-            assertNull(connectedHost.dseWorkload);
-            assertFalse(connectedHost.isDseGraphEnabled);
-            assertNull(connectedHost.dseVersion);
-            assertEquals(connectedHost.tokens, Sets.newHashSet("0"));
-
-            HostInfo peerHost = hosts.get(1);
-            assertEquals(peerHost.address, scassandra.address(2));
-            assertEquals(peerHost.version, "2.1.8");
-            assertEquals(peerHost.datacenter, "DC1");
-            assertEquals(peerHost.rack, "rack1");
-            assertEquals(peerHost.broadcastAddress, scassandra.address(2).getAddress());
-            //todo listen address is null in scassandra
-            assertNull(peerHost.listenAddress);
-            assertNull(peerHost.dseWorkload);
-            assertFalse(peerHost.isDseGraphEnabled);
-            assertNull(peerHost.dseVersion);
-            assertEquals(peerHost.tokens, Sets.newHashSet("4611686018427387903"));
+            return connection;
         }
-        finally {
-            cluster.close();
-            scassandra.stop();
-        }
+
+        abstract void performAssert(ScassandraCluster scassandra, ControlConnection connection);
     }
 
     static class QueryPlanCountingPolicy extends DelegatingLoadBalancingPolicy {

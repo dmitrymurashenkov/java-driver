@@ -60,15 +60,21 @@ class ControlConnection implements Connection.Owner {
     private final Cluster.Manager cluster;
     private final ClusterHosts hosts;
     private final MetadataParser metadataParser;
+    private final PeerRowValidator rowValidator;
 
     private final AtomicReference<ListenableFuture<?>> reconnectionAttempt = new AtomicReference<ListenableFuture<?>>();
 
     private volatile boolean isShutdown;
 
     public ControlConnection(Cluster.Manager manager) {
+        this(manager, new PeerRowValidator());
+    }
+
+    public ControlConnection(Cluster.Manager manager, PeerRowValidator rowValidator) {
         this.cluster = manager;
         this.hosts = cluster.metadata;
         this.metadataParser = new MetadataParser(hosts, cluster);
+        this.rowValidator = rowValidator;
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
@@ -390,6 +396,10 @@ class ControlConnection implements Connection.Owner {
     }
 
     List<HostInfo> getHostsInfo() {
+        return getHostsInfo(true);
+    }
+
+    List<HostInfo> getHostsInfo(boolean logInvalidPeers) {
         try {
             Connection c = getConnection();
             List<HostInfo> hosts = new ArrayList<HostInfo>();
@@ -403,7 +413,12 @@ class ControlConnection implements Connection.Owner {
             }
 
             for (Row peerNodeRow : peerRows.get()) {
-                hosts.add(metadataParser.parseHost(peerNodeRow, metadataParser.resolveHostAddress(peerNodeRow, c.address)));
+                if (rowValidator.isValidPeer(peerNodeRow, logInvalidPeers)) {
+                    InetSocketAddress peerAddress = metadataParser.resolveHostAddress(peerNodeRow, c.address);
+                    if (peerAddress != null) {
+                        hosts.add(metadataParser.parseHost(peerNodeRow, peerAddress));
+                    }
+                }
             }
 
             return hosts;
@@ -595,6 +610,7 @@ class ControlConnection implements Connection.Owner {
         if (!isInitialConnection)
             cluster.loadBalancingPolicy().onAdd(host);
     }
+
 
     private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers, ClusterHosts hosts) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         logger.debug("[Control connection] Refreshing node list and token map");

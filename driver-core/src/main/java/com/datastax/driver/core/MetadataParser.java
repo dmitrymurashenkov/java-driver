@@ -27,7 +27,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 
-public class MetadataParser {
+class MetadataParser {
 
     private static final Logger logger = LoggerFactory.getLogger(MetadataParser.class);
 
