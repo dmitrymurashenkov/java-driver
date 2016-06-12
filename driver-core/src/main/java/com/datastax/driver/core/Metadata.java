@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
 /**
  * Keeps metadata on the connected cluster, including known nodes and schema definitions.
  */
-public class Metadata {
+public class Metadata implements ClusterHosts {
 
     private static final Logger logger = LoggerFactory.getLogger(Metadata.class);
 
@@ -80,11 +80,11 @@ public class Metadata {
         }
     }
 
-    Host newHost(InetSocketAddress address) {
+    public Host newHost(InetSocketAddress address) {
         return new Host(address, cluster.convictionPolicyFactory, cluster);
     }
 
-    Host addIfAbsent(Host host) {
+    public Host addIfAbsent(Host host) {
         Host previous = hosts.putIfAbsent(host.getSocketAddress(), host);
         return previous == null ? host : null;
     }
@@ -97,7 +97,7 @@ public class Metadata {
         return hosts.remove(host.getSocketAddress()) != null;
     }
 
-    Host getHost(InetSocketAddress address) {
+    public Host getHost(InetSocketAddress address) {
         return hosts.get(address);
     }
 

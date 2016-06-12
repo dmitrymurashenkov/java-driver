@@ -58,6 +58,7 @@ class ControlConnection implements Connection.Owner {
     final AtomicReference<Connection> connectionRef = new AtomicReference<Connection>();
 
     private final Cluster.Manager cluster;
+    private final ClusterHosts hosts;
 
     private final AtomicReference<ListenableFuture<?>> reconnectionAttempt = new AtomicReference<ListenableFuture<?>>();
 
@@ -65,6 +66,7 @@ class ControlConnection implements Connection.Owner {
 
     public ControlConnection(Cluster.Manager manager) {
         this.cluster = manager;
+        this.hosts = cluster.metadata;
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
@@ -92,7 +94,7 @@ class ControlConnection implements Connection.Owner {
         Connection current = connectionRef.get();
         return (current == null)
                 ? null
-                : cluster.metadata.getHost(current.address);
+                : hosts.getHost(current.address);
     }
 
     void triggerReconnect() {
@@ -262,15 +264,15 @@ class ControlConnection implements Connection.Owner {
 
             // We need to refresh the node list first so we know about the cassandra version of
             // the node we're connecting to.
-            refreshNodeListAndTokenMap(connection, cluster, isInitialConnection, true);
+            refreshNodeListAndTokenMap(connection, cluster, isInitialConnection, true, hosts);
 
             logger.debug("[Control connection] Refreshing schema");
-            refreshSchema(connection, null, null, null, null, cluster);
+            refreshSchema(connection, null, null, null, null, cluster, hosts);
 
             // We need to refresh the node list again;
             // We want that because the token map was not properly initialized by the first call above,
             // since it requires the list of keyspaces to be loaded.
-            refreshNodeListAndTokenMap(connection, cluster, false, false);
+            refreshNodeListAndTokenMap(connection, cluster, false, false, hosts);
 
             return connection;
         } catch (BusyConnectionException e) {
@@ -300,7 +302,7 @@ class ControlConnection implements Connection.Owner {
             // At startup, when we add the initial nodes, this will be null, which is ok
             if (c == null || c.isClosed())
                 return;
-            refreshSchema(c, targetType, targetKeyspace, targetName, signature, cluster);
+            refreshSchema(c, targetType, targetKeyspace, targetName, signature, cluster, hosts);
             // If we rebuild all from scratch or have an updated keyspace, rebuild the token map
             // since some replication on some keyspace may have changed
             if ((targetType == null || targetType == KEYSPACE)) {
@@ -320,8 +322,8 @@ class ControlConnection implements Connection.Owner {
         }
     }
 
-    static void refreshSchema(Connection connection, SchemaElement targetType, String targetKeyspace, String targetName, List<String> targetSignature, Cluster.Manager cluster) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
-        Host host = cluster.metadata.getHost(connection.address);
+    static void refreshSchema(Connection connection, SchemaElement targetType, String targetKeyspace, String targetName, List<String> targetSignature, Cluster.Manager cluster, ClusterHosts hosts) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+        Host host = hosts.getHost(connection.address);
         // Neither host, nor it's version should be null. But instead of dying if there is a race or something, we can kind of try to infer
         // a Cassandra version from the protocol version (this is not full proof, we can have the protocol 1 against C* 2.0+, but it's worth
         // a shot, and since we log in this case, it should be relatively easy to debug when if this ever fail).
@@ -347,7 +349,7 @@ class ControlConnection implements Connection.Owner {
             return;
 
         try {
-            refreshNodeListAndTokenMap(c, cluster, false, true);
+            refreshNodeListAndTokenMap(c, cluster, false, true, hosts);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refreshing node list and token map ({})", e.getMessage());
             signalError();
@@ -525,7 +527,7 @@ class ControlConnection implements Connection.Owner {
             cluster.loadBalancingPolicy().onAdd(host);
     }
 
-    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers, ClusterHosts hosts) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         logger.debug("[Control connection] Refreshing node list and token map");
 
         boolean metadataEnabled = cluster.configuration.getQueryOptions().isMetadataEnabled();
@@ -551,7 +553,7 @@ class ControlConnection implements Connection.Owner {
             if (partitioner != null)
                 cluster.metadata.partitioner = partitioner;
 
-            Host host = cluster.metadata.getHost(connection.address);
+            Host host = hosts.getHost(connection.address);
             // In theory host can't be null. However there is no point in risking a NPE in case we
             // have a race between a node removal and this.
             if (host == null) {
@@ -602,13 +604,13 @@ class ControlConnection implements Connection.Owner {
         }
 
         for (int i = 0; i < foundHosts.size(); i++) {
-            Host host = cluster.metadata.getHost(foundHosts.get(i));
+            Host host = hosts.getHost(foundHosts.get(i));
             boolean isNew = false;
             if (host == null) {
                 // We don't know that node, create the Host object but wait until we've set the known
                 // info before signaling the addition.
-                Host newHost = cluster.metadata.newHost(foundHosts.get(i));
-                Host existing = cluster.metadata.addIfAbsent(newHost);
+                Host newHost = hosts.newHost(foundHosts.get(i));
+                Host existing = hosts.addIfAbsent(newHost);
                 if (existing == null) {
                     host = newHost;
                     isNew = true;
@@ -642,7 +644,7 @@ class ControlConnection implements Connection.Owner {
 
         // Removes all those that seems to have been removed (since we lost the control connection)
         Set<InetSocketAddress> foundHostsSet = new HashSet<InetSocketAddress>(foundHosts);
-        for (Host host : cluster.metadata.allHosts())
+        for (Host host : hosts.getAllHosts())
             if (!host.getSocketAddress().equals(connection.address) && !foundHostsSet.contains(host.getSocketAddress()))
                 cluster.removeHost(host, isInitialConnection);
 
@@ -690,13 +692,13 @@ class ControlConnection implements Connection.Owner {
             sb.append(", ").append(columnName).append("=null");
     }
 
-    static boolean waitForSchemaAgreement(Connection connection, Cluster.Manager cluster) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+    static boolean waitForSchemaAgreement(Connection connection, Cluster.Manager cluster, ClusterHosts hosts) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         long start = System.nanoTime();
         long elapsed = 0;
         int maxSchemaAgreementWaitSeconds = cluster.configuration.getProtocolOptions().getMaxSchemaAgreementWaitSeconds();
         while (elapsed < maxSchemaAgreementWaitSeconds * 1000) {
 
-            if (checkSchemaAgreement(connection, cluster))
+            if (checkSchemaAgreement(connection, cluster, hosts))
                 return true;
 
             // let's not flood the node too much
@@ -708,7 +710,7 @@ class ControlConnection implements Connection.Owner {
         return false;
     }
 
-    private static boolean checkSchemaAgreement(Connection connection, Cluster.Manager cluster) throws InterruptedException, ExecutionException {
+    private static boolean checkSchemaAgreement(Connection connection, Cluster.Manager cluster, ClusterHosts hosts) throws InterruptedException, ExecutionException {
         DefaultResultSetFuture peersFuture = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_SCHEMA_PEERS));
         DefaultResultSetFuture localFuture = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_SCHEMA_LOCAL));
         connection.write(peersFuture);
@@ -726,7 +728,7 @@ class ControlConnection implements Connection.Owner {
             if (addr == null || row.isNull("schema_version"))
                 continue;
 
-            Host peer = cluster.metadata.getHost(addr);
+            Host peer = hosts.getHost(addr);
             if (peer != null && peer.isUp())
                 versions.add(row.getUUID("schema_version"));
         }
@@ -738,7 +740,7 @@ class ControlConnection implements Connection.Owner {
         Connection connection = connectionRef.get();
         return connection != null &&
                 !connection.isClosed() &&
-                checkSchemaAgreement(connection, cluster);
+                checkSchemaAgreement(connection, cluster, hosts);
     }
 
     boolean isOpen() {
