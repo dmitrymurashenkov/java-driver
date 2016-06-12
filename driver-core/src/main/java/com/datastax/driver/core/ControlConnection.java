@@ -68,14 +68,9 @@ class ControlConnection implements Connection.Owner {
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
-    void connect() throws UnsupportedProtocolVersionException {
+    void connect(List<Host> hosts) throws UnsupportedProtocolVersionException {
         if (isShutdown)
             return;
-
-        // NB: at this stage, allHosts() only contains the initial contact points
-        List<Host> hosts = new ArrayList<Host>(cluster.metadata.allHosts());
-        // shuffle so that multiple clients with the same contact points don't all pick the same control host
-        Collections.shuffle(hosts);
         setNewConnection(reconnectInternal(hosts.iterator(), true));
     }
 

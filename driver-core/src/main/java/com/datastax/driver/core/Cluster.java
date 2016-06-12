@@ -1420,14 +1420,17 @@ public class Cluster implements Closeable {
             Set<Host> contactPointHosts = Sets.newHashSet(allHosts);
 
             try {
+                List<Host> initialContactPoints = new ArrayList<Host>(metadata.allHosts());
+                // shuffle so that multiple clients with the same contact points don't all pick the same control host
+                Collections.shuffle(initialContactPoints);
                 try {
-                    controlConnection.connect();
+                    controlConnection.connect(initialContactPoints);
                 } catch (UnsupportedProtocolVersionException e) {
                     logger.debug("Cannot connect with protocol {}, trying {}", e.getUnsupportedVersion(), e.getServerVersion());
 
                     connectionFactory.protocolVersion = e.getServerVersion();
                     try {
-                        controlConnection.connect();
+                        controlConnection.connect(initialContactPoints);
                     } catch (UnsupportedProtocolVersionException e1) {
                         throw new DriverInternalError("Cannot connect to node with its own version, this makes no sense", e);
                     }
