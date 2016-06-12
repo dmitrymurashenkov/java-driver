@@ -20,6 +20,7 @@ import com.datastax.driver.core.utils.CassandraVersion;
 import com.google.common.base.Function;
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import org.apache.log4j.Level;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,9 +29,7 @@ import org.testng.annotations.Test;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -39,6 +38,7 @@ import static com.datastax.driver.core.CreateCCM.TestMode.PER_METHOD;
 import static com.datastax.driver.core.TestUtils.nonDebouncingQueryOptions;
 import static com.datastax.driver.core.TestUtils.nonQuietClusterCloseOptions;
 import static com.google.common.collect.Lists.newArrayList;
+import static org.testng.Assert.*;
 
 @CreateCCM(PER_METHOD)
 @CCMConfig(dirtiesContext = true, createCluster = false)
@@ -307,6 +307,146 @@ public class ControlConnectionTest extends CCMTestsSupport {
             cLogger.setLevel(originalLevel);
             cluster.close();
             scassandraCluster.stop();
+        }
+    }
+
+    @Test(groups = "unit")
+    public void getClusterInfo_should_return_cluster_info() {
+        ScassandraCluster scassandra = ScassandraCluster.builder().withNodes(1).build();
+        Cluster cluster = Cluster.builder()
+                .addContactPoints(scassandra.address(1).getAddress())
+                .withPort(scassandra.getBinaryPort())
+                .withNettyOptions(nonQuietClusterCloseOptions)
+                .build();
+
+        try {
+            scassandra.init();
+            cluster.init();
+
+            ControlConnection connection = new ControlConnection(cluster.manager);
+            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().newHost(scassandra.address(1)));
+            connection.connect(contactPoints);
+            ClusterInfo clusterInfo = connection.getClusterInfo();
+
+            assertNotNull(clusterInfo);
+            assertEquals(clusterInfo.clusterName, "scassandra");
+            assertEquals(clusterInfo.partitioner, "org.apache.cassandra.dht.Murmur3Partitioner");
+        }
+        finally {
+            cluster.close();
+            scassandra.stop();
+        }
+    }
+
+    @Test(groups = "unit", expectedExceptions = IllegalStateException.class)
+    public void getClusterInfo_should_throw_exception_if_not_connected() {
+        Cluster cluster = Cluster.builder()
+                .addContactPoints("127.0.0.1")
+                .withPort(1234)
+                .withNettyOptions(nonQuietClusterCloseOptions)
+                .build();
+
+        try {
+            new ControlConnection(cluster.manager).getClusterInfo();
+        }
+        finally {
+            cluster.close();
+        }
+    }
+
+    @Test(groups = "unit")
+    public void getHosts_should_return_info_about_connected_host() {
+        ScassandraCluster scassandra = ScassandraCluster.builder()
+                .withNodes(1)
+                .forcePeerInfo(1, 1, "release_version", "2.1.8")
+                .build();
+        Cluster cluster = Cluster.builder()
+                .addContactPoints(scassandra.address(1).getAddress())
+                .withPort(scassandra.getBinaryPort())
+                .withNettyOptions(nonQuietClusterCloseOptions)
+                .build();
+
+        try {
+            scassandra.init();
+            cluster.init();
+
+            ControlConnection connection = new ControlConnection(cluster.manager);
+            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().newHost(scassandra.address(1)));
+            connection.connect(contactPoints);
+            List<HostInfo> hosts = connection.getHostsInfo();
+
+            assertEquals(hosts.size(), 1);
+            HostInfo host = hosts.get(0);
+            assertEquals(host.address, scassandra.address(1));
+            assertEquals(host.version, "2.1.8");
+            assertEquals(host.datacenter, "DC1");
+            assertEquals(host.rack, "rack1");
+            assertEquals(host.broadcastAddress, scassandra.address(1).getAddress());
+            assertEquals(host.listenAddress, scassandra.address(1).getAddress());
+            assertNull(host.dseWorkload);
+            assertFalse(host.isDseGraphEnabled);
+            assertNull(host.dseVersion);
+            assertEquals(host.tokens, Sets.newHashSet("0"));
+        }
+        finally {
+            cluster.close();
+            scassandra.stop();
+        }
+    }
+
+    @Test(groups = "unit")
+    public void getHosts_should_return_info_about_peer_host() {
+        ScassandraCluster scassandra = ScassandraCluster.builder()
+                .withNodes(2)
+                .forcePeerInfo(1, 1, "release_version", "2.1.8")
+                .forcePeerInfo(1, 2, "release_version", "2.1.8")
+                .build();
+        Cluster cluster = Cluster.builder()
+                .addContactPoints(scassandra.address(1).getAddress())
+                .withPort(scassandra.getBinaryPort())
+                .withNettyOptions(nonQuietClusterCloseOptions)
+                .build();
+
+        try {
+            scassandra.init();
+            cluster.init();
+
+            ControlConnection connection = new ControlConnection(cluster.manager);
+            List<Host> contactPoints = Arrays.asList(cluster.getMetadata().newHost(scassandra.address(1)));
+            connection.connect(contactPoints);
+            List<HostInfo> hosts = connection.getHostsInfo();
+
+            //first host is always connected one - lets keep it that way for simplicity
+            assertEquals(hosts.size(), 2);
+
+            HostInfo connectedHost = hosts.get(0);
+            assertEquals(connectedHost.address, scassandra.address(1));
+            assertEquals(connectedHost.version, "2.1.8");
+            assertEquals(connectedHost.datacenter, "DC1");
+            assertEquals(connectedHost.rack, "rack1");
+            assertEquals(connectedHost.broadcastAddress, scassandra.address(1).getAddress());
+            assertEquals(connectedHost.listenAddress, scassandra.address(1).getAddress());
+            assertNull(connectedHost.dseWorkload);
+            assertFalse(connectedHost.isDseGraphEnabled);
+            assertNull(connectedHost.dseVersion);
+            assertEquals(connectedHost.tokens, Sets.newHashSet("0"));
+
+            HostInfo peerHost = hosts.get(1);
+            assertEquals(peerHost.address, scassandra.address(2));
+            assertEquals(peerHost.version, "2.1.8");
+            assertEquals(peerHost.datacenter, "DC1");
+            assertEquals(peerHost.rack, "rack1");
+            assertEquals(peerHost.broadcastAddress, scassandra.address(2).getAddress());
+            //todo listen address is null in scassandra
+            assertNull(peerHost.listenAddress);
+            assertNull(peerHost.dseWorkload);
+            assertFalse(peerHost.isDseGraphEnabled);
+            assertNull(peerHost.dseVersion);
+            assertEquals(peerHost.tokens, Sets.newHashSet("4611686018427387903"));
+        }
+        finally {
+            cluster.close();
+            scassandra.stop();
         }
     }
 

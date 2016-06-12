@@ -78,9 +78,9 @@ public class Host {
     private volatile boolean dseGraphEnabled;
     private volatile VersionNumber dseVersion;
 
-    // ClusterMetadata keeps one Host object per inet address and we rely on this (more precisely,
+    // ClusterInfo keeps one Host object per inet address and we rely on this (more precisely,
     // we rely on the fact that we can use Object equality as a valid equality), so don't use
-    // that constructor but ClusterMetadata.getHost instead.
+    // that constructor but ClusterInfo.getHost instead.
     Host(InetSocketAddress address, ConvictionPolicy.Factory convictionPolicyFactory, Cluster.Manager manager) {
         if (address == null || convictionPolicyFactory == null)
             throw new NullPointerException();

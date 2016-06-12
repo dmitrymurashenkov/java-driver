@@ -59,6 +59,7 @@ class ControlConnection implements Connection.Owner {
 
     private final Cluster.Manager cluster;
     private final ClusterHosts hosts;
+    private final MetadataParser metadataParser;
 
     private final AtomicReference<ListenableFuture<?>> reconnectionAttempt = new AtomicReference<ListenableFuture<?>>();
 
@@ -67,6 +68,7 @@ class ControlConnection implements Connection.Owner {
     public ControlConnection(Cluster.Manager manager) {
         this.cluster = manager;
         this.hosts = cluster.metadata;
+        this.metadataParser = new MetadataParser(hosts, cluster);
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
@@ -365,6 +367,73 @@ class ControlConnection implements Connection.Owner {
             Thread.currentThread().interrupt();
             logger.debug("[Control connection] Interrupted while refreshing node list and token map, skipping it.");
         }
+    }
+
+    ClusterInfo getClusterInfo() {
+        try {
+            Connection c = getConnection();
+            DefaultResultSetFuture localRow = queryLocalNode(c);
+            Row localNodeRow = localRow.get().one();
+            if (localNodeRow != null) {
+                return metadataParser.parseClusterInfo(localNodeRow);
+            }
+            //todo or throw exception?
+            return null;
+        }
+        catch (InterruptedException e) {
+            //todo exception handling
+            throw new DriverException(e);
+        } catch (ExecutionException e) {
+            //todo exception handling
+            throw new DriverException(e);
+        }
+    }
+
+    List<HostInfo> getHostsInfo() {
+        try {
+            Connection c = getConnection();
+            List<HostInfo> hosts = new ArrayList<HostInfo>();
+
+            DefaultResultSetFuture localRow = queryLocalNode(c);
+            DefaultResultSetFuture peerRows = queryPeerNodes(c);
+
+            Row localNodeRow = localRow.get().one();
+            if (localNodeRow != null) {
+                hosts.add(metadataParser.parseHost(localNodeRow, c.address));
+            }
+
+            for (Row peerNodeRow : peerRows.get()) {
+                hosts.add(metadataParser.parseHost(peerNodeRow, metadataParser.resolveHostAddress(peerNodeRow, c.address)));
+            }
+
+            return hosts;
+        } catch (InterruptedException e) {
+            //todo exception handling
+            throw new DriverException(e);
+        } catch (ExecutionException e) {
+            //todo exception handling
+            throw new DriverException(e);
+        }
+    }
+
+    private Connection getConnection() {
+        Connection c = connectionRef.get();
+        if (c == null || c.isClosed()) {
+            throw new IllegalStateException("Not connected");
+        };
+        return c;
+    }
+
+    private DefaultResultSetFuture queryLocalNode(Connection c) {
+        DefaultResultSetFuture future = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_LOCAL));
+        c.write(future);
+        return future;
+    }
+
+    private DefaultResultSetFuture queryPeerNodes(Connection c) {
+        DefaultResultSetFuture future = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_PEERS));
+        c.write(future);
+        return future;
     }
 
     private static InetSocketAddress rpcAddressForPeerHost(Row peersRow, InetSocketAddress connectedHost, Cluster.Manager cluster) {
