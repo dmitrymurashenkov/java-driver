@@ -51,6 +51,7 @@ class ControlConnectionHandler {
 
             List<HostInfo> hosts = new ArrayList<HostInfo>();
             Row localNodeRow = localFuture.get().one();
+            //todo why local row may be null?
             if (localNodeRow != null) {
                 clusterInfo = metadataParser.parseClusterInfo(localNodeRow);
                 hosts.add(metadataParser.parseHost(localNodeRow, connection.address));

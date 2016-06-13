@@ -61,6 +61,7 @@ class ControlConnection implements Connection.Owner {
     private final ClusterHosts hosts;
     private final MetadataParser metadataParser;
     private final PeerRowValidator rowValidator;
+    private final HostUpdater hostUpdater;
 
     private final AtomicReference<ListenableFuture<?>> reconnectionAttempt = new AtomicReference<ListenableFuture<?>>();
 
@@ -75,6 +76,7 @@ class ControlConnection implements Connection.Owner {
         this.hosts = cluster.metadata;
         this.metadataParser = new MetadataParser(hosts, cluster);
         this.rowValidator = rowValidator;
+        this.hostUpdater = new HostUpdater(cluster.loadBalancingPolicy());
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
@@ -272,7 +274,7 @@ class ControlConnection implements Connection.Owner {
 
             // We need to refresh the node list first so we know about the cassandra version of
             // the node we're connecting to.
-            refreshNodeListAndTokenMap(connection, cluster, isInitialConnection, true, hosts);
+            refreshNodeListAndTokenMap(connection, isInitialConnection, true);
 
             logger.debug("[Control connection] Refreshing schema");
             refreshSchema(connection, null, null, null, null, cluster, hosts);
@@ -280,7 +282,7 @@ class ControlConnection implements Connection.Owner {
             // We need to refresh the node list again;
             // We want that because the token map was not properly initialized by the first call above,
             // since it requires the list of keyspaces to be loaded.
-            refreshNodeListAndTokenMap(connection, cluster, false, false, hosts);
+            refreshNodeListAndTokenMap(connection, false, false);
 
             return connection;
         } catch (BusyConnectionException e) {
@@ -357,7 +359,7 @@ class ControlConnection implements Connection.Owner {
             return;
 
         try {
-            refreshNodeListAndTokenMap(c, cluster, false, true, hosts);
+            refreshNodeListAndTokenMap(c, false, true);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refreshing node list and token map ({})", e.getMessage());
             signalError();
@@ -373,82 +375,6 @@ class ControlConnection implements Connection.Owner {
             Thread.currentThread().interrupt();
             logger.debug("[Control connection] Interrupted while refreshing node list and token map, skipping it.");
         }
-    }
-
-    ClusterInfo getClusterInfo() {
-        try {
-            Connection c = getConnection();
-            DefaultResultSetFuture localRow = queryLocalNode(c);
-            Row localNodeRow = localRow.get().one();
-            if (localNodeRow != null) {
-                return metadataParser.parseClusterInfo(localNodeRow);
-            }
-            //todo or throw exception?
-            return null;
-        }
-        catch (InterruptedException e) {
-            //todo exception handling
-            throw new DriverException(e);
-        } catch (ExecutionException e) {
-            //todo exception handling
-            throw new DriverException(e);
-        }
-    }
-
-    List<HostInfo> getHostsInfo() {
-        return getHostsInfo(true);
-    }
-
-    List<HostInfo> getHostsInfo(boolean logInvalidPeers) {
-        try {
-            Connection c = getConnection();
-            List<HostInfo> hosts = new ArrayList<HostInfo>();
-
-            DefaultResultSetFuture localRow = queryLocalNode(c);
-            DefaultResultSetFuture peerRows = queryPeerNodes(c);
-
-            Row localNodeRow = localRow.get().one();
-            if (localNodeRow != null) {
-                hosts.add(metadataParser.parseHost(localNodeRow, c.address));
-            }
-
-            for (Row peerNodeRow : peerRows.get()) {
-                if (rowValidator.isValidPeer(peerNodeRow, logInvalidPeers)) {
-                    InetSocketAddress peerAddress = metadataParser.resolveHostAddress(peerNodeRow, c.address);
-                    if (peerAddress != null) {
-                        hosts.add(metadataParser.parseHost(peerNodeRow, peerAddress));
-                    }
-                }
-            }
-
-            return hosts;
-        } catch (InterruptedException e) {
-            //todo exception handling
-            throw new DriverException(e);
-        } catch (ExecutionException e) {
-            //todo exception handling
-            throw new DriverException(e);
-        }
-    }
-
-    private Connection getConnection() {
-        Connection c = connectionRef.get();
-        if (c == null || c.isClosed()) {
-            throw new IllegalStateException("Not connected");
-        };
-        return c;
-    }
-
-    private DefaultResultSetFuture queryLocalNode(Connection c) {
-        DefaultResultSetFuture future = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_LOCAL));
-        c.write(future);
-        return future;
-    }
-
-    private DefaultResultSetFuture queryPeerNodes(Connection c) {
-        DefaultResultSetFuture future = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_PEERS));
-        c.write(future);
-        return future;
     }
 
     private static InetSocketAddress rpcAddressForPeerHost(Row peersRow, InetSocketAddress connectedHost, Cluster.Manager cluster) {
@@ -523,7 +449,7 @@ class ControlConnection implements Connection.Owner {
                 // Ignore hosts with a null rpc_address, as this is most likely a phantom row in system.peers (JAVA-428).
                 // Don't test this for the control host since we're already connected to it anyway, and we read the info from system.local
                 // which didn't have an rpc_address column (JAVA-546) until CASSANDRA-9436
-            } else if (!c.address.equals(host.getSocketAddress()) && !isValidPeer(row, true)) {
+            } else if (!c.address.equals(host.getSocketAddress()) && !rowValidator.isValidPeer(row, true)) {
                 return false;
             }
 
@@ -611,90 +537,27 @@ class ControlConnection implements Connection.Owner {
             cluster.loadBalancingPolicy().onAdd(host);
     }
 
-
-    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers, ClusterHosts hosts) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+    private void refreshNodeListAndTokenMap(Connection connection, boolean isInitialConnection, boolean logInvalidPeers) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         logger.debug("[Control connection] Refreshing node list and token map");
-
+        ControlConnectionHandler connectionHandler = new ControlConnectionHandler(connection, cluster.protocolVersion(), metadataParser, rowValidator);
+        connectionHandler.reloadData(logInvalidPeers);
         boolean metadataEnabled = cluster.configuration.getQueryOptions().isMetadataEnabled();
 
-        // Make sure we're up to date on nodes and tokens
+        ClusterInfo clusterInfo = connectionHandler.getClusterInfo();
+        if (clusterInfo != null) {
+            cluster.metadata.clusterName = clusterInfo.clusterName;
+            cluster.metadata.partitioner = clusterInfo.partitioner;
+        }
 
-        DefaultResultSetFuture localFuture = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_LOCAL));
-        DefaultResultSetFuture peersFuture = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_PEERS));
-        connection.write(localFuture);
-        connection.write(peersFuture);
-
-        String partitioner = null;
+        List<HostInfo> hostInfos = connectionHandler.getHostsInfo();
         Map<Host, Collection<String>> tokenMap = new HashMap<Host, Collection<String>>();
-
-        // Update cluster name, DC and rack for the one node we are connected to
-        Row localRow = localFuture.get().one();
-        if (localRow != null) {
-            String clusterName = localRow.getString("cluster_name");
-            if (clusterName != null)
-                cluster.metadata.clusterName = clusterName;
-
-            partitioner = localRow.getString("partitioner");
-            if (partitioner != null)
-                cluster.metadata.partitioner = partitioner;
-
-            Host host = hosts.getHost(connection.address);
-            // In theory host can't be null. However there is no point in risking a NPE in case we
-            // have a race between a node removal and this.
-            if (host == null) {
-                logger.debug("Host in local system table ({}) unknown to us (ok if said host just got removed)", connection.address);
-            } else {
-                updateInfo(host, localRow, cluster, isInitialConnection);
-                if (metadataEnabled) {
-                    Set<String> tokens = localRow.getSet("tokens", String.class);
-                    if (partitioner != null && !tokens.isEmpty())
-                        tokenMap.put(host, tokens);
-                }
-            }
-        }
-
-        List<InetSocketAddress> foundHosts = new ArrayList<InetSocketAddress>();
-        List<String> dcs = new ArrayList<String>();
-        List<String> racks = new ArrayList<String>();
-        List<String> cassandraVersions = new ArrayList<String>();
-        List<InetAddress> broadcastAddresses = new ArrayList<InetAddress>();
-        List<InetAddress> listenAddresses = new ArrayList<InetAddress>();
-        List<Set<String>> allTokens = new ArrayList<Set<String>>();
-        List<String> dseVersions = new ArrayList<String>();
-        List<Boolean> dseGraphEnabled = new ArrayList<Boolean>();
-        List<String> dseWorkloads = new ArrayList<String>();
-
-        for (Row row : peersFuture.get()) {
-            if (!isValidPeer(row, logInvalidPeers))
-                continue;
-
-            InetSocketAddress rpcAddress = rpcAddressForPeerHost(row, connection.address, cluster);
-            if (rpcAddress == null)
-                continue;
-            foundHosts.add(rpcAddress);
-            dcs.add(row.getString("data_center"));
-            racks.add(row.getString("rack"));
-            cassandraVersions.add(row.getString("release_version"));
-            broadcastAddresses.add(row.getInet("peer"));
-            if (metadataEnabled)
-                allTokens.add(row.getSet("tokens", String.class));
-            InetAddress listenAddress = row.getColumnDefinitions().contains("listen_address") ? row.getInet("listen_address") : null;
-            listenAddresses.add(listenAddress);
-            String dseWorkload = row.getColumnDefinitions().contains("workload") ? row.getString("workload") : null;
-            dseWorkloads.add(dseWorkload);
-            Boolean isDseGraph = row.getColumnDefinitions().contains("graph") ? row.getBool("graph") : null;
-            dseGraphEnabled.add(isDseGraph);
-            String dseVersion = row.getColumnDefinitions().contains("dse_version") ? row.getString("dse_version") : null;
-            dseVersions.add(dseVersion);
-        }
-
-        for (int i = 0; i < foundHosts.size(); i++) {
-            Host host = hosts.getHost(foundHosts.get(i));
+        for (HostInfo hostInfo : hostInfos) {
+            Host host = hosts.getHost(hostInfo.address);
             boolean isNew = false;
             if (host == null) {
                 // We don't know that node, create the Host object but wait until we've set the known
                 // info before signaling the addition.
-                Host newHost = hosts.newHost(foundHosts.get(i));
+                Host newHost = hosts.newHost(hostInfo.address);
                 Host existing = hosts.addIfAbsent(newHost);
                 if (existing == null) {
                     host = newHost;
@@ -704,77 +567,30 @@ class ControlConnection implements Connection.Owner {
                     isNew = false;
                 }
             }
-            if (dcs.get(i) != null || racks.get(i) != null)
-                updateLocationInfo(host, dcs.get(i), racks.get(i), isInitialConnection, cluster);
-            if (cassandraVersions.get(i) != null)
-                host.setVersion(cassandraVersions.get(i));
-            if (broadcastAddresses.get(i) != null)
-                host.setBroadcastAddress(broadcastAddresses.get(i));
-            if (listenAddresses.get(i) != null)
-                host.setListenAddress(listenAddresses.get(i));
-
-            if (dseVersions.get(i) != null)
-                host.setDseVersion(dseVersions.get(i));
-            if (dseWorkloads.get(i) != null)
-                host.setDseWorkload(dseWorkloads.get(i));
-            if (dseGraphEnabled.get(i) != null)
-                host.setDseGraphEnabled(dseGraphEnabled.get(i));
-
-            if (metadataEnabled && partitioner != null && !allTokens.get(i).isEmpty())
-                tokenMap.put(host, allTokens.get(i));
-
+            if (!hostInfo.tokens.isEmpty())
+                tokenMap.put(host, hostInfo.tokens);
+            hostUpdater.updateHost(host, hostInfo, isInitialConnection);
             if (isNew && !isInitialConnection)
                 cluster.triggerOnAdd(host);
         }
 
-        // Removes all those that seems to have been removed (since we lost the control connection)
-        Set<InetSocketAddress> foundHostsSet = new HashSet<InetSocketAddress>(foundHosts);
+        Set<InetSocketAddress> foundHostsSet = toAddresses(hostInfos);
         for (Host host : hosts.getAllHosts())
+            //todo "no hosts found" is valid case but we are still connected to some host and should not remove it
+            //logic is too complex - need to add explanation or simplify it
             if (!host.getSocketAddress().equals(connection.address) && !foundHostsSet.contains(host.getSocketAddress()))
                 cluster.removeHost(host, isInitialConnection);
 
         if (metadataEnabled)
-            cluster.metadata.rebuildTokenMap(partitioner, tokenMap);
+            cluster.metadata.rebuildTokenMap(clusterInfo == null ? null : clusterInfo.partitioner, tokenMap);
     }
 
-    private static boolean isValidPeer(Row peerRow, boolean logIfInvalid) {
-        boolean isValid = peerRow.getColumnDefinitions().contains("rpc_address")
-                && !peerRow.isNull("rpc_address");
-        if (EXTENDED_PEER_CHECK) {
-            isValid &= peerRow.getColumnDefinitions().contains("host_id")
-                    && !peerRow.isNull("host_id")
-                    && peerRow.getColumnDefinitions().contains("data_center")
-                    && !peerRow.isNull("data_center")
-                    && peerRow.getColumnDefinitions().contains("rack")
-                    && !peerRow.isNull("rack")
-                    && peerRow.getColumnDefinitions().contains("tokens")
-                    && !peerRow.isNull("tokens");
+    private Set<InetSocketAddress> toAddresses(Collection<HostInfo> hostInfos) {
+        Set<InetSocketAddress> adresses = new HashSet<InetSocketAddress>();
+        for (HostInfo hostInfo : hostInfos) {
+            adresses.add(hostInfo.address);
         }
-        if (!isValid && logIfInvalid)
-            logger.warn("Found invalid row in system.peers: {}. " +
-                    "This is likely a gossip or snitch issue, this host will be ignored.", formatInvalidPeer(peerRow));
-        return isValid;
-    }
-
-    // Custom formatting to avoid spamming the logs if 'tokens' is present and contains a gazillion tokens
-    private static String formatInvalidPeer(Row peerRow) {
-        StringBuilder sb = new StringBuilder("[peer=" + peerRow.getInet("peer"));
-        formatMissingOrNullColumn(peerRow, "rpc_address", sb);
-        if (EXTENDED_PEER_CHECK) {
-            formatMissingOrNullColumn(peerRow, "host_id", sb);
-            formatMissingOrNullColumn(peerRow, "data_center", sb);
-            formatMissingOrNullColumn(peerRow, "rack", sb);
-            formatMissingOrNullColumn(peerRow, "tokens", sb);
-        }
-        sb.append("]");
-        return sb.toString();
-    }
-
-    private static void formatMissingOrNullColumn(Row peerRow, String columnName, StringBuilder sb) {
-        if (!peerRow.getColumnDefinitions().contains(columnName))
-            sb.append(", missing ").append(columnName);
-        else if (peerRow.isNull(columnName))
-            sb.append(", ").append(columnName).append("=null");
+        return adresses;
     }
 
     static boolean waitForSchemaAgreement(Connection connection, Cluster.Manager cluster, ClusterHosts hosts) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
