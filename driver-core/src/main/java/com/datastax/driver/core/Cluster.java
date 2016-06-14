@@ -1290,7 +1290,7 @@ public class Cluster implements Closeable {
      * that Manager is not publicly visible. For instance, we wouldn't want
      * user to be able to call the {@link #onUp} and {@link #onDown} methods.
      */
-    class Manager implements Connection.DefaultResponseHandler {
+    class Manager implements Connection.DefaultResponseHandler, InetAddressTranslator {
 
         final String clusterName;
         private boolean isInit;
@@ -1549,7 +1549,8 @@ public class Cluster implements Closeable {
             return configuration.getPolicies().getReconnectionPolicy();
         }
 
-        InetSocketAddress translateAddress(InetAddress address) {
+        @Override
+        public InetSocketAddress translateAddress(InetAddress address) {
             InetSocketAddress sa = new InetSocketAddress(address, connectionFactory.getPort());
             InetSocketAddress translated = configuration.getPolicies().getAddressTranslator().translate(sa);
             return translated == null ? sa : translated;

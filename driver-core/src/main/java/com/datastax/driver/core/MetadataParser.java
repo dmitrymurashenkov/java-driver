@@ -41,13 +41,12 @@ class MetadataParser {
         }
     }
 
-    //todo add interface for need Cluster methods
-    private final Cluster.Manager cluster;
+    private final InetAddressTranslator addressTranslator;
     private final ClusterHosts hosts;
 
-    public MetadataParser(ClusterHosts hosts, Cluster.Manager cluster) {
+    public MetadataParser(ClusterHosts hosts, InetAddressTranslator addressTranslator) {
         this.hosts = hosts;
-        this.cluster = cluster;
+        this.addressTranslator = addressTranslator;
     }
 
     ClusterInfo parseClusterInfo(Row row) throws ExecutionException, InterruptedException {
@@ -126,6 +125,6 @@ class MetadataParser {
             logger.warn("Found host with 0.0.0.0 as rpc_address, using broadcast_address ({}) to contact it instead. If this is incorrect you should avoid the use of 0.0.0.0 server side.", broadcastAddress);
             rpcAddress = broadcastAddress;
         }
-        return cluster.translateAddress(rpcAddress);
+        return addressTranslator.translateAddress(rpcAddress);
     }
 }

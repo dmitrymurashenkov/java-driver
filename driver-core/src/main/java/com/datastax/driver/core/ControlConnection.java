@@ -62,6 +62,7 @@ class ControlConnection implements Connection.Owner {
     private final MetadataParser metadataParser;
     private final PeerRowValidator rowValidator;
     private final HostUpdater hostUpdater;
+    private final InetAddressTranslator addressTranslator;
 
     private final AtomicReference<ListenableFuture<?>> reconnectionAttempt = new AtomicReference<ListenableFuture<?>>();
 
@@ -77,6 +78,7 @@ class ControlConnection implements Connection.Owner {
         this.metadataParser = new MetadataParser(hosts, cluster);
         this.rowValidator = rowValidator;
         this.hostUpdater = new HostUpdater(cluster.loadBalancingPolicy());
+        this.addressTranslator = manager;
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
