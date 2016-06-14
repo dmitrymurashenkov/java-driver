@@ -15,7 +15,11 @@
  */
 package com.datastax.driver.core;
 
+import com.datastax.driver.core.exceptions.BusyConnectionException;
+import com.datastax.driver.core.exceptions.ConnectionException;
 import com.datastax.driver.core.exceptions.DriverException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
@@ -42,38 +46,29 @@ class ControlConnectionHandler {
         this.rowValidator = rowValidator;
     }
 
-    void reloadData(boolean logInvalidPeers) {
-        try {
-            DefaultResultSetFuture localFuture = new DefaultResultSetFuture(null, protocolVersion, new Requests.Query(SELECT_LOCAL));
-            DefaultResultSetFuture peersFuture = new DefaultResultSetFuture(null, protocolVersion, new Requests.Query(SELECT_PEERS));
-            connection.write(localFuture);
-            connection.write(peersFuture);
+    void reloadData(boolean logInvalidPeers) throws ExecutionException, InterruptedException {
+        DefaultResultSetFuture localFuture = new DefaultResultSetFuture(null, protocolVersion, new Requests.Query(SELECT_LOCAL));
+        DefaultResultSetFuture peersFuture = new DefaultResultSetFuture(null, protocolVersion, new Requests.Query(SELECT_PEERS));
+        connection.write(localFuture);
+        connection.write(peersFuture);
 
-            List<HostInfo> hosts = new ArrayList<HostInfo>();
-            Row localNodeRow = localFuture.get().one();
-            //todo why local row may be null?
-            if (localNodeRow != null) {
-                clusterInfo = metadataParser.parseClusterInfo(localNodeRow);
-                hosts.add(metadataParser.parseHost(localNodeRow, connection.address));
-            }
+        List<HostInfo> hosts = new ArrayList<HostInfo>();
+        Row localNodeRow = localFuture.get().one();
+        //todo why local row may be null?
+        if (localNodeRow != null) {
+            clusterInfo = metadataParser.parseClusterInfo(localNodeRow);
+            hosts.add(metadataParser.parseHost(localNodeRow, connection.address));
+        }
 
-            for (Row peerNodeRow : peersFuture.get()) {
-                if (rowValidator.isValidPeer(peerNodeRow, logInvalidPeers)) {
-                    InetSocketAddress peerAddress = metadataParser.resolveHostAddress(peerNodeRow, connection.address);
-                    if (peerAddress != null) {
-                        hosts.add(metadataParser.parseHost(peerNodeRow, peerAddress));
-                    }
+        for (Row peerNodeRow : peersFuture.get()) {
+            if (rowValidator.isValidPeer(peerNodeRow, logInvalidPeers)) {
+                InetSocketAddress peerAddress = metadataParser.resolveHostAddress(peerNodeRow, connection.address);
+                if (peerAddress != null) {
+                    hosts.add(metadataParser.parseHost(peerNodeRow, peerAddress));
                 }
             }
-            this.hosts = Collections.unmodifiableList(hosts);
         }
-        catch (InterruptedException e) {
-            //todo exception handling
-            throw new DriverException(e);
-        } catch (ExecutionException e) {
-            //todo exception handling
-            throw new DriverException(e);
-        }
+        this.hosts = Collections.unmodifiableList(hosts);
     }
 
     ClusterInfo getClusterInfo() {
@@ -82,5 +77,14 @@ class ControlConnectionHandler {
 
     List<HostInfo> getHostsInfo() {
         return hosts;
+    }
+
+    HostInfo getHostInfo(InetSocketAddress address) {
+        for (HostInfo hostInfo: hosts) {
+            if (hostInfo.address.equals(address)) {
+                return hostInfo;
+            }
+        }
+        return null;
     }
 }

@@ -36,8 +36,6 @@ class ControlConnection implements Connection.Owner {
 
     private static final Logger logger = LoggerFactory.getLogger(ControlConnection.class);
 
-    private static final boolean EXTENDED_PEER_CHECK = SystemProperties.getBoolean("com.datastax.driver.EXTENDED_PEER_CHECK", true);
-
     private static final InetAddress bindAllAddress;
 
     static {
@@ -47,9 +45,6 @@ class ControlConnection implements Connection.Owner {
             throw new RuntimeException(e);
         }
     }
-
-    private static final String SELECT_PEERS = "SELECT * FROM system.peers";
-    private static final String SELECT_LOCAL = "SELECT * FROM system.local WHERE key='local'";
 
     private static final String SELECT_SCHEMA_PEERS = "SELECT peer, rpc_address, schema_version FROM system.peers";
     private static final String SELECT_SCHEMA_LOCAL = "SELECT schema_version FROM system.local WHERE key='local'";
@@ -404,60 +399,34 @@ class ControlConnection implements Connection.Owner {
         return cluster.translateAddress(rpcAddress);
     }
 
-    private Row fetchNodeInfo(Host host, Connection c) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
-        boolean isConnectedHost = c.address.equals(host.getSocketAddress());
-        if (isConnectedHost || host.getBroadcastAddress() != null) {
-            DefaultResultSetFuture future = isConnectedHost
-                    ? new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_LOCAL))
-                    : new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_PEERS + " WHERE peer='" + host.getBroadcastAddress().getHostAddress() + '\''));
-            c.write(future);
-            return future.get().one();
-        }
-
-        // We have to fetch the whole peers table and find the host we're looking for
-        DefaultResultSetFuture future = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_PEERS));
-        c.write(future);
-        for (Row row : future.get()) {
-            InetSocketAddress addr = rpcAddressForPeerHost(row, c.address, cluster);
-            if (addr != null && addr.equals(host.getSocketAddress()))
-                return row;
-        }
-        return null;
-    }
-
     /**
      * @return whether we have enough information to bring the node back up
      */
     boolean refreshNodeInfo(Host host) {
-
         Connection c = connectionRef.get();
         // At startup, when we add the initial nodes, this will be null, which is ok
         if (c == null || c.isClosed())
             return true;
-
-        logger.debug("[Control connection] Refreshing node info on {}", host);
+        ControlConnectionHandler connectionHandler = new ControlConnectionHandler(c, cluster.protocolVersion(), metadataParser, rowValidator);
         try {
-            Row row = fetchNodeInfo(host, c);
-            if (row == null) {
+
+            //todo do not need to load info about all nodes here so we can optimize it
+            connectionHandler.reloadData(false);
+            HostInfo hostInfo = connectionHandler.getHostInfo(host.getSocketAddress());
+
+            if (hostInfo == null) {
                 if (c.isDefunct()) {
                     logger.debug("Control connection is down, could not refresh node info");
                     // Keep going with what we currently know about the node, otherwise we will ignore all nodes
                     // until the control connection is back up (which leads to a catch-22 if there is only one)
                     return true;
                 } else {
+                    //todo actually we may have checks local table instead of peer or row was present but invalid
                     logger.warn("No row found for host {} in {}'s peers system table. {} will be ignored.", host.getAddress(), c.address, host.getAddress());
                     return false;
                 }
-                // Ignore hosts with a null rpc_address, as this is most likely a phantom row in system.peers (JAVA-428).
-                // Don't test this for the control host since we're already connected to it anyway, and we read the info from system.local
-                // which didn't have an rpc_address column (JAVA-546) until CASSANDRA-9436
-            } else if (!c.address.equals(host.getSocketAddress()) && !rowValidator.isValidPeer(row, true)) {
-                return false;
             }
-
-            updateInfo(host, row, cluster, false);
-            return true;
-
+            hostUpdater.updateHost(host, hostInfo, false);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refreshing node info ({})", e.getMessage());
             signalError();
@@ -479,64 +448,6 @@ class ControlConnection implements Connection.Owner {
         // If we got an exception, always return true. Otherwise a faulty control connection would cause
         // reconnected hosts to be ignored permanently.
         return true;
-    }
-
-    // row can come either from the 'local' table or the 'peers' one
-    private static void updateInfo(Host host, Row row, Cluster.Manager cluster, boolean isInitialConnection) {
-        if (!row.isNull("data_center") || !row.isNull("rack"))
-            updateLocationInfo(host, row.getString("data_center"), row.getString("rack"), isInitialConnection, cluster);
-
-        String version = row.getString("release_version");
-        host.setVersion(version);
-
-        // Before CASSANDRA-9436 local row did not contain any info about the host addresses.
-        // After CASSANDRA-9436 (2.0.16, 2.1.6, 2.2.0 rc1) local row contains two new columns:
-        // - broadcast_address
-        // - rpc_address
-        // After CASSANDRA-9603 (2.0.17, 2.1.8, 2.2.0 rc2) local row contains one more column:
-        // - listen_address
-
-        InetAddress broadcastAddress = null;
-        if (row.getColumnDefinitions().contains("peer")) { // system.peers
-            broadcastAddress = row.getInet("peer");
-        } else if (row.getColumnDefinitions().contains("broadcast_address")) { // system.local
-            broadcastAddress = row.getInet("broadcast_address");
-        }
-        host.setBroadcastAddress(broadcastAddress);
-
-        // in system.local only for C* versions >= 2.0.17, 2.1.8, 2.2.0 rc2,
-        // not yet in system.peers as of C* 3.2
-        InetAddress listenAddress = row.getColumnDefinitions().contains("listen_address")
-                ? row.getInet("listen_address")
-                : null;
-        host.setListenAddress(listenAddress);
-
-        if (row.getColumnDefinitions().contains("workload")) {
-            String dseWorkload = row.getString("workload");
-            host.setDseWorkload(dseWorkload);
-        }
-        if (row.getColumnDefinitions().contains("graph")) {
-            boolean isDseGraph = row.getBool("graph");
-            host.setDseGraphEnabled(isDseGraph);
-        }
-        if (row.getColumnDefinitions().contains("dse_version")) {
-            String dseVersion = row.getString("dse_version");
-            host.setDseVersion(dseVersion);
-        }
-    }
-
-    private static void updateLocationInfo(Host host, String datacenter, String rack, boolean isInitialConnection, Cluster.Manager cluster) {
-        if (Objects.equal(host.getDatacenter(), datacenter) && Objects.equal(host.getRack(), rack))
-            return;
-
-        // If the dc/rack information changes for an existing node, we need to update the load balancing policy.
-        // For that, we remove and re-add the node against the policy. Not the most elegant, and assumes
-        // that the policy will update correctly, but in practice this should work.
-        if (!isInitialConnection)
-            cluster.loadBalancingPolicy().onDown(host);
-        host.setLocationInfo(datacenter, rack);
-        if (!isInitialConnection)
-            cluster.loadBalancingPolicy().onAdd(host);
     }
 
     private void refreshNodeListAndTokenMap(Connection connection, boolean isInitialConnection, boolean logInvalidPeers) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {

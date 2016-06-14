@@ -23,6 +23,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 
 import static com.datastax.driver.core.TestUtils.nonQuietClusterCloseOptions;
 import static org.testng.Assert.*;
@@ -31,7 +32,7 @@ import static org.testng.Assert.assertNull;
 
 public class ControlConnectionHandlerTest {
     @Test(groups = "unit")
-    public void getClusterInfo_should_return_cluster_info() throws ClusterNameMismatchException, InterruptedException {
+    public void getClusterInfo_should_return_cluster_info() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         ScassandraCluster scassandra = ScassandraCluster.builder().withNodes(1).build();
 
         new RunClusterAssertion(scassandra) {
@@ -47,7 +48,7 @@ public class ControlConnectionHandlerTest {
     }
 
     @Test(groups = "unit")
-    public void getHosts_should_return_info_about_connected_host() throws ClusterNameMismatchException, InterruptedException {
+    public void getHosts_should_return_info_about_connected_host() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         ScassandraCluster scassandra = ScassandraCluster.builder()
                 .withNodes(1)
                 .forcePeerInfo(1, 1, "release_version", "2.1.8")
@@ -75,7 +76,7 @@ public class ControlConnectionHandlerTest {
     }
 
     @Test(groups = "unit")
-    public void getHosts_should_return_info_about_peer_host() throws ClusterNameMismatchException, InterruptedException {
+    public void getHosts_should_return_info_about_peer_host() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         ScassandraCluster scassandra = ScassandraCluster.builder()
                 .withNodes(2)
                 .forcePeerInfo(1, 1, "release_version", "2.1.8")
@@ -118,7 +119,7 @@ public class ControlConnectionHandlerTest {
     }
 
     @Test(groups = "unit")
-    public void getHosts_should_ignore_peer_with_nulls_in_required_columns() throws ClusterNameMismatchException, InterruptedException {
+    public void getHosts_should_ignore_peer_with_nulls_in_required_columns() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         List<String> nonNullColumns = Arrays.asList(
                 "peer",
                 "rpc_address",
@@ -144,7 +145,7 @@ public class ControlConnectionHandlerTest {
     }
 
     @Test(groups = "unit")
-    public void getHosts_should_ignore_peer_with_nulls_in_critical_required_columns_if_extended_peer_check_false() throws ClusterNameMismatchException, InterruptedException {
+    public void getHosts_should_ignore_peer_with_nulls_in_critical_required_columns_if_extended_peer_check_false() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         List<String> requiredColumns = Arrays.asList(
                 "peer",
                 "rpc_address");
@@ -166,7 +167,7 @@ public class ControlConnectionHandlerTest {
     }
 
     @Test(groups = "unit")
-    public void getHosts_should_add_peer_with_nulls_in_non_critical_columns_if_extended_peer_check_false() throws ClusterNameMismatchException, InterruptedException {
+    public void getHosts_should_add_peer_with_nulls_in_non_critical_columns_if_extended_peer_check_false() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         List<String> nonCriticalRequiredColumns = Arrays.asList(
                 "host_id",
                 "data_center",
@@ -191,7 +192,7 @@ public class ControlConnectionHandlerTest {
     }
 
     @Test(groups = "unit")
-    public void getHosts_should_add_peer_if_rpc_address_is_bind_all() throws UnknownHostException, ClusterNameMismatchException, InterruptedException {
+    public void getHosts_should_add_peer_if_rpc_address_is_bind_all() throws UnknownHostException, ClusterNameMismatchException, InterruptedException, ExecutionException {
         ScassandraCluster tmp = ScassandraCluster.builder().withNodes(3).build();
         ScassandraCluster scassandra = ScassandraCluster.builder()
                 .withNodes(3)
@@ -213,16 +214,16 @@ public class ControlConnectionHandlerTest {
      * Utility class to wrap running-closing cluster into try-finally
      */
     private abstract static class RunClusterAssertion {
-        RunClusterAssertion(ScassandraCluster scassandra) throws ClusterNameMismatchException, InterruptedException {
+        RunClusterAssertion(ScassandraCluster scassandra) throws ClusterNameMismatchException, InterruptedException, ExecutionException {
             this(scassandra, new PeerRowValidator());
         }
 
-        RunClusterAssertion(ScassandraCluster scassandra, PeerRowValidator rowValidator) throws ClusterNameMismatchException, InterruptedException {
+        RunClusterAssertion(ScassandraCluster scassandra, PeerRowValidator rowValidator) throws ClusterNameMismatchException, InterruptedException, ExecutionException {
             //calling run right away so that nobody forgets to invoke it
             run(scassandra, rowValidator);
         }
 
-        private void run(ScassandraCluster scassandra, PeerRowValidator rowValidator) throws ClusterNameMismatchException, InterruptedException {
+        private void run(ScassandraCluster scassandra, PeerRowValidator rowValidator) throws ClusterNameMismatchException, InterruptedException, ExecutionException {
             Cluster cluster = Cluster.builder()
                     .addContactPoints(scassandra.address(1).getAddress())
                     .withPort(scassandra.getBinaryPort())
