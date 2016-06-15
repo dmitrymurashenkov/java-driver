@@ -17,7 +17,6 @@ package com.datastax.driver.core;
 
 import com.datastax.driver.core.exceptions.*;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Objects;
 import com.google.common.util.concurrent.ListenableFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -474,145 +473,31 @@ class ControlConnection implements Connection.Owner {
 
     // row can come either from the 'local' table or the 'peers' one
     private static void updateInfo(Host host, Row row, Cluster.Manager cluster, boolean isInitialConnection) {
-        if (!row.isNull("data_center") || !row.isNull("rack"))
-            updateLocationInfo(host, row.getString("data_center"), row.getString("rack"), isInitialConnection, cluster);
-
-        String version = row.getString("release_version");
-        host.setVersion(version);
-
-        // Before CASSANDRA-9436 local row did not contain any info about the host addresses.
-        // After CASSANDRA-9436 (2.0.16, 2.1.6, 2.2.0 rc1) local row contains two new columns:
-        // - broadcast_address
-        // - rpc_address
-        // After CASSANDRA-9603 (2.0.17, 2.1.8, 2.2.0 rc2) local row contains one more column:
-        // - listen_address
-
-        InetAddress broadcastAddress = null;
-        if (row.getColumnDefinitions().contains("peer")) { // system.peers
-            broadcastAddress = row.getInet("peer");
-        } else if (row.getColumnDefinitions().contains("broadcast_address")) { // system.local
-            broadcastAddress = row.getInet("broadcast_address");
-        }
-        host.setBroadcastAddress(broadcastAddress);
-
-        // in system.local only for C* versions >= 2.0.17, 2.1.8, 2.2.0 rc2,
-        // not yet in system.peers as of C* 3.2
-        InetAddress listenAddress = row.getColumnDefinitions().contains("listen_address")
-                ? row.getInet("listen_address")
-                : null;
-        host.setListenAddress(listenAddress);
-
-        if (row.getColumnDefinitions().contains("workload")) {
-            String dseWorkload = row.getString("workload");
-            host.setDseWorkload(dseWorkload);
-        }
-        if (row.getColumnDefinitions().contains("graph")) {
-            boolean isDseGraph = row.getBool("graph");
-            host.setDseGraphEnabled(isDseGraph);
-        }
-        if (row.getColumnDefinitions().contains("dse_version")) {
-            String dseVersion = row.getString("dse_version");
-            host.setDseVersion(dseVersion);
-        }
-    }
-
-    private static void updateLocationInfo(Host host, String datacenter, String rack, boolean isInitialConnection, Cluster.Manager cluster) {
-        if (Objects.equal(host.getDatacenter(), datacenter) && Objects.equal(host.getRack(), rack))
-            return;
-
-        // If the dc/rack information changes for an existing node, we need to update the load balancing policy.
-        // For that, we remove and re-add the node against the policy. Not the most elegant, and assumes
-        // that the policy will update correctly, but in practice this should work.
-        if (!isInitialConnection)
-            cluster.loadBalancingPolicy().onDown(host);
-        host.setLocationInfo(datacenter, rack);
-        if (!isInitialConnection)
-            cluster.loadBalancingPolicy().onAdd(host);
+        HostInfo info = new ClusterMetadataParser().parseHost(row, host.getSocketAddress());
+        new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, info, isInitialConnection);
     }
 
     private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         logger.debug("[Control connection] Refreshing node list and token map");
-
+        FetchClusterMetadataOperation fetch = new FetchClusterMetadataOperation(connection, cluster.protocolVersion(), new ClusterMetadataParser(), new PeerRowAddressResolver(cluster), new PeerRowValidator());
+        fetch.reloadData(logInvalidPeers);
         boolean metadataEnabled = cluster.configuration.getQueryOptions().isMetadataEnabled();
 
-        // Make sure we're up to date on nodes and tokens
+        ClusterInfo clusterInfo = fetch.getClusterInfo();
+        if (clusterInfo != null) {
+            cluster.metadata.clusterName = clusterInfo.clusterName;
+            cluster.metadata.partitioner = clusterInfo.partitioner;
+        }
 
-        DefaultResultSetFuture localFuture = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_LOCAL));
-        DefaultResultSetFuture peersFuture = new DefaultResultSetFuture(null, cluster.protocolVersion(), new Requests.Query(SELECT_PEERS));
-        connection.write(localFuture);
-        connection.write(peersFuture);
-
-        String partitioner = null;
+        List<HostInfo> hostInfos = fetch.getHostsInfo();
         Map<Host, Collection<String>> tokenMap = new HashMap<Host, Collection<String>>();
-
-        // Update cluster name, DC and rack for the one node we are connected to
-        Row localRow = localFuture.get().one();
-        if (localRow != null) {
-            String clusterName = localRow.getString("cluster_name");
-            if (clusterName != null)
-                cluster.metadata.clusterName = clusterName;
-
-            partitioner = localRow.getString("partitioner");
-            if (partitioner != null)
-                cluster.metadata.partitioner = partitioner;
-
-            Host host = cluster.metadata.getHost(connection.address);
-            // In theory host can't be null. However there is no point in risking a NPE in case we
-            // have a race between a node removal and this.
-            if (host == null) {
-                logger.debug("Host in local system table ({}) unknown to us (ok if said host just got removed)", connection.address);
-            } else {
-                updateInfo(host, localRow, cluster, isInitialConnection);
-                if (metadataEnabled) {
-                    Set<String> tokens = localRow.getSet("tokens", String.class);
-                    if (partitioner != null && !tokens.isEmpty())
-                        tokenMap.put(host, tokens);
-                }
-            }
-        }
-
-        List<InetSocketAddress> foundHosts = new ArrayList<InetSocketAddress>();
-        List<String> dcs = new ArrayList<String>();
-        List<String> racks = new ArrayList<String>();
-        List<String> cassandraVersions = new ArrayList<String>();
-        List<InetAddress> broadcastAddresses = new ArrayList<InetAddress>();
-        List<InetAddress> listenAddresses = new ArrayList<InetAddress>();
-        List<Set<String>> allTokens = new ArrayList<Set<String>>();
-        List<String> dseVersions = new ArrayList<String>();
-        List<Boolean> dseGraphEnabled = new ArrayList<Boolean>();
-        List<String> dseWorkloads = new ArrayList<String>();
-
-        for (Row row : peersFuture.get()) {
-            if (!isValidPeer(row, logInvalidPeers))
-                continue;
-
-            InetSocketAddress rpcAddress = rpcAddressForPeerHost(row, connection.address, cluster);
-            if (rpcAddress == null)
-                continue;
-            foundHosts.add(rpcAddress);
-            dcs.add(row.getString("data_center"));
-            racks.add(row.getString("rack"));
-            cassandraVersions.add(row.getString("release_version"));
-            broadcastAddresses.add(row.getInet("peer"));
-            if (metadataEnabled)
-                allTokens.add(row.getSet("tokens", String.class));
-            InetAddress listenAddress = row.getColumnDefinitions().contains("listen_address") ? row.getInet("listen_address") : null;
-            listenAddresses.add(listenAddress);
-            String dseWorkload = row.getColumnDefinitions().contains("workload") ? row.getString("workload") : null;
-            dseWorkloads.add(dseWorkload);
-            Boolean isDseGraph = row.getColumnDefinitions().contains("graph") ? row.getBool("graph") : null;
-            dseGraphEnabled.add(isDseGraph);
-            String dseVersion = row.getColumnDefinitions().contains("dse_version") ? row.getString("dse_version") : null;
-            dseVersions.add(dseVersion);
-        }
-
-        for (int i = 0; i < foundHosts.size(); i++) {
-            Host host = cluster.metadata.getHost(foundHosts.get(i));
+        for (HostInfo hostInfo : hostInfos) {
+            Host host = cluster.metadata.getHost(hostInfo.address);
             boolean isNew = false;
             if (host == null) {
                 // We don't know that node, create the Host object but wait until we've set the known
                 // info before signaling the addition.
-                Host newHost = cluster.metadata.newHost(foundHosts.get(i));
+                Host newHost = cluster.metadata.newHost(hostInfo.address);
                 Host existing = cluster.metadata.addIfAbsent(newHost);
                 if (existing == null) {
                     host = newHost;
@@ -622,37 +507,21 @@ class ControlConnection implements Connection.Owner {
                     isNew = false;
                 }
             }
-            if (dcs.get(i) != null || racks.get(i) != null)
-                updateLocationInfo(host, dcs.get(i), racks.get(i), isInitialConnection, cluster);
-            if (cassandraVersions.get(i) != null)
-                host.setVersion(cassandraVersions.get(i));
-            if (broadcastAddresses.get(i) != null)
-                host.setBroadcastAddress(broadcastAddresses.get(i));
-            if (listenAddresses.get(i) != null)
-                host.setListenAddress(listenAddresses.get(i));
-
-            if (dseVersions.get(i) != null)
-                host.setDseVersion(dseVersions.get(i));
-            if (dseWorkloads.get(i) != null)
-                host.setDseWorkload(dseWorkloads.get(i));
-            if (dseGraphEnabled.get(i) != null)
-                host.setDseGraphEnabled(dseGraphEnabled.get(i));
-
-            if (metadataEnabled && partitioner != null && !allTokens.get(i).isEmpty())
-                tokenMap.put(host, allTokens.get(i));
-
+            if (!hostInfo.tokens.isEmpty())
+                tokenMap.put(host, hostInfo.tokens);
+            new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, hostInfo, isInitialConnection);
             if (isNew && !isInitialConnection)
                 cluster.triggerOnAdd(host);
         }
 
-        // Removes all those that seems to have been removed (since we lost the control connection)
-        Set<InetSocketAddress> foundHostsSet = new HashSet<InetSocketAddress>(foundHosts);
-        for (Host host : cluster.metadata.allHosts())
+        Set<InetSocketAddress> foundHostsSet = fetch.getHostsAddresses();
+        for (Host host : cluster.metadata.getAllHosts())
+            //todo "no hosts found" is valid case but we are still connected to some host and should not remove it?
             if (!host.getSocketAddress().equals(connection.address) && !foundHostsSet.contains(host.getSocketAddress()))
                 cluster.removeHost(host, isInitialConnection);
 
         if (metadataEnabled)
-            cluster.metadata.rebuildTokenMap(partitioner, tokenMap);
+            cluster.metadata.rebuildTokenMap(clusterInfo == null ? null : clusterInfo.partitioner, tokenMap);
     }
 
     private static boolean isValidPeer(Row peerRow, boolean logIfInvalid) {
