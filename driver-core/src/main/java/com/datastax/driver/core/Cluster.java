@@ -1373,7 +1373,7 @@ public class Cluster implements Closeable {
             this.reaper = new ConnectionReaper(this);
             this.metadata = new Metadata(this);
             this.connectionFactory = new Connection.Factory(this, configuration);
-            this.controlConnection = new ControlConnection(this);
+            this.controlConnection = new ControlConnection(this, SystemTablesQuery.FACTORY);
             this.metrics = configuration.getMetricsOptions().isEnabled() ? new Metrics(this) : null;
             this.preparedQueries = new MapMaker().weakValues().makeMap();
 

@@ -30,7 +30,7 @@ import static org.testng.Assert.*;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNull;
 
-public class FetchClusterMetadataOperationTest {
+public class FetchClusterMetadataOperationShortTest {
     @Test(groups = "short")
     public void getClusterInfo_should_return_cluster_info() throws ClusterNameMismatchException, InterruptedException, ExecutionException {
         ScassandraCluster scassandra = ScassandraCluster.builder().withNodes(1).build();
@@ -245,7 +245,7 @@ public class FetchClusterMetadataOperationTest {
 
         FetchClusterMetadataOperation openConnection(ScassandraCluster scassandra, Cluster cluster, PeerRowValidator rowValidator) throws ClusterNameMismatchException, InterruptedException {
             Connection connection = cluster.manager.connectionFactory.open(cluster.getMetadata().getHost(scassandra.address(1)));
-            return new FetchClusterMetadataOperation(connection, cluster.manager.protocolVersion(), new ClusterMetadataParser(), new PeerRowAddressResolver(cluster.manager), rowValidator);
+            return new FetchClusterMetadataOperation(SystemTablesQuery.FACTORY.request(connection, cluster.manager.protocolVersion()), new ClusterMetadataParser(), new RpcPortResolver.Impl(cluster.manager), rowValidator);
         }
 
         abstract void performAssert(ScassandraCluster scassandra, FetchClusterMetadataOperation connection);

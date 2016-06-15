@@ -57,13 +57,15 @@ class ControlConnection implements Connection.Owner {
     final AtomicReference<Connection> connectionRef = new AtomicReference<Connection>();
 
     private final Cluster.Manager cluster;
+    private final SystemTablesQuery.Factory metadataRequestFactory;
 
     private final AtomicReference<ListenableFuture<?>> reconnectionAttempt = new AtomicReference<ListenableFuture<?>>();
 
     private volatile boolean isShutdown;
 
-    public ControlConnection(Cluster.Manager manager) {
+    public ControlConnection(Cluster.Manager manager, SystemTablesQuery.Factory metadataRequestFactory) {
         this.cluster = manager;
+        this.metadataRequestFactory = metadataRequestFactory;
     }
 
     // Only for the initial connection. Does not schedule retries if it fails
@@ -266,15 +268,15 @@ class ControlConnection implements Connection.Owner {
 
             // We need to refresh the node list first so we know about the cassandra version of
             // the node we're connecting to.
-            refreshNodeListAndTokenMap(connection, cluster, isInitialConnection, true);
+            refreshNodeListAndTokenMap(connection, cluster, isInitialConnection, true, metadataRequestFactory);
 
             logger.debug("[Control connection] Refreshing schema");
-            refreshSchema(connection, null, null, null, null, cluster);
+            refreshSchema(connection, null, null, null, null, cluster, metadataRequestFactory);
 
             // We need to refresh the node list again;
             // We want that because the token map was not properly initialized by the first call above,
             // since it requires the list of keyspaces to be loaded.
-            refreshNodeListAndTokenMap(connection, cluster, false, false);
+            refreshNodeListAndTokenMap(connection, cluster, false, false, metadataRequestFactory);
 
             return connection;
         } catch (BusyConnectionException e) {
@@ -304,7 +306,7 @@ class ControlConnection implements Connection.Owner {
             // At startup, when we add the initial nodes, this will be null, which is ok
             if (c == null || c.isClosed())
                 return;
-            refreshSchema(c, targetType, targetKeyspace, targetName, signature, cluster);
+            refreshSchema(c, targetType, targetKeyspace, targetName, signature, cluster, metadataRequestFactory);
             // If we rebuild all from scratch or have an updated keyspace, rebuild the token map
             // since some replication on some keyspace may have changed
             if ((targetType == null || targetType == KEYSPACE)) {
@@ -324,7 +326,7 @@ class ControlConnection implements Connection.Owner {
         }
     }
 
-    static void refreshSchema(Connection connection, SchemaElement targetType, String targetKeyspace, String targetName, List<String> targetSignature, Cluster.Manager cluster) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+    static void refreshSchema(Connection connection, SchemaElement targetType, String targetKeyspace, String targetName, List<String> targetSignature, Cluster.Manager cluster, SystemTablesQuery.Factory metadataRequestFactory) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         Host host = cluster.metadata.getHost(connection.address);
         // Neither host, nor it's version should be null. But instead of dying if there is a race or something, we can kind of try to infer
         // a Cassandra version from the protocol version (this is not full proof, we can have the protocol 1 against C* 2.0+, but it's worth
@@ -351,7 +353,7 @@ class ControlConnection implements Connection.Owner {
             return;
 
         try {
-            refreshNodeListAndTokenMap(c, cluster, false, true);
+            refreshNodeListAndTokenMap(c, cluster, false, true, metadataRequestFactory);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refreshing node list and token map ({})", e.getMessage());
             signalError();
@@ -477,9 +479,9 @@ class ControlConnection implements Connection.Owner {
         new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, info, isInitialConnection);
     }
 
-    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers, SystemTablesQuery.Factory metadataRequestFactory) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         logger.debug("[Control connection] Refreshing node list and token map");
-        FetchClusterMetadataOperation fetch = new FetchClusterMetadataOperation(connection, cluster.protocolVersion(), new ClusterMetadataParser(), new PeerRowAddressResolver(cluster), new PeerRowValidator());
+        FetchClusterMetadataOperation fetch = new FetchClusterMetadataOperation(metadataRequestFactory.request(connection, cluster.protocolVersion()), new ClusterMetadataParser(), new RpcPortResolver.Impl(cluster), new PeerRowValidator());
         fetch.reloadData(logInvalidPeers);
         boolean metadataEnabled = cluster.configuration.getQueryOptions().isMetadataEnabled();
 
@@ -516,7 +518,6 @@ class ControlConnection implements Connection.Owner {
 
         Set<InetSocketAddress> foundHostsSet = fetch.getHostsAddresses();
         for (Host host : cluster.metadata.getAllHosts())
-            //todo "no hosts found" is valid case but we are still connected to some host and should not remove it?
             if (!host.getSocketAddress().equals(connection.address) && !foundHostsSet.contains(host.getSocketAddress()))
                 cluster.removeHost(host, isInitialConnection);
 
