@@ -199,7 +199,7 @@ class ControlConnection implements Connection.Owner {
                 if (!host.convictionPolicy.canReconnectNow())
                     continue;
                 try {
-                    return tryConnect(host, isInitialConnection);
+                    return tryConnect(host);
                 } catch (ConnectionException e) {
                     errors = logError(host, e, errors, iter);
                     if (isInitialConnection) {
@@ -250,7 +250,7 @@ class ControlConnection implements Connection.Owner {
         return errors;
     }
 
-    private Connection tryConnect(Host host, boolean isInitialConnection) throws ConnectionException, ExecutionException, InterruptedException, UnsupportedProtocolVersionException, ClusterNameMismatchException {
+    private Connection tryConnect(Host host) throws ConnectionException, ExecutionException, InterruptedException, UnsupportedProtocolVersionException, ClusterNameMismatchException {
         Connection connection = cluster.connectionFactory.open(host);
 
         // If no protocol version was specified, set the default as soon as a connection succeeds (it's needed to parse UDTs in refreshSchema)
@@ -268,7 +268,7 @@ class ControlConnection implements Connection.Owner {
 
             // We need to refresh the node list first so we know about the cassandra version of
             // the node we're connecting to.
-            refreshNodeListAndTokenMap(connection, cluster, isInitialConnection, true, metadataRequestFactory);
+            refreshNodeListAndTokenMap(connection, cluster, true, metadataRequestFactory);
 
             logger.debug("[Control connection] Refreshing schema");
             refreshSchema(connection, null, null, null, null, cluster, metadataRequestFactory);
@@ -276,7 +276,7 @@ class ControlConnection implements Connection.Owner {
             // We need to refresh the node list again;
             // We want that because the token map was not properly initialized by the first call above,
             // since it requires the list of keyspaces to be loaded.
-            refreshNodeListAndTokenMap(connection, cluster, false, false, metadataRequestFactory);
+            refreshNodeListAndTokenMap(connection, cluster, false, metadataRequestFactory);
 
             return connection;
         } catch (BusyConnectionException e) {
@@ -353,7 +353,7 @@ class ControlConnection implements Connection.Owner {
             return;
 
         try {
-            refreshNodeListAndTokenMap(c, cluster, false, true, metadataRequestFactory);
+            refreshNodeListAndTokenMap(c, cluster, true, metadataRequestFactory);
         } catch (ConnectionException e) {
             logger.debug("[Control connection] Connection error while refreshing node list and token map ({})", e.getMessage());
             signalError();
@@ -447,7 +447,7 @@ class ControlConnection implements Connection.Owner {
                 return false;
             }
 
-            updateInfo(host, row, cluster, false);
+            updateInfo(host, row, cluster);
             return true;
 
         } catch (ConnectionException e) {
@@ -474,12 +474,12 @@ class ControlConnection implements Connection.Owner {
     }
 
     // row can come either from the 'local' table or the 'peers' one
-    private static void updateInfo(Host host, Row row, Cluster.Manager cluster, boolean isInitialConnection) {
+    private static void updateInfo(Host host, Row row, Cluster.Manager cluster) {
         HostInfo info = new ClusterMetadataParser().parseHost(row, host.getSocketAddress());
-        new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, info, isInitialConnection);
+        new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, info);
     }
 
-    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean isInitialConnection, boolean logInvalidPeers, SystemTablesQuery.Factory metadataRequestFactory) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
+    private static void refreshNodeListAndTokenMap(Connection connection, Cluster.Manager cluster, boolean logInvalidPeers, SystemTablesQuery.Factory metadataRequestFactory) throws ConnectionException, BusyConnectionException, ExecutionException, InterruptedException {
         logger.debug("[Control connection] Refreshing node list and token map");
         FetchClusterMetadataOperation fetch = new FetchClusterMetadataOperation(metadataRequestFactory.request(connection, cluster.protocolVersion()), new ClusterMetadataParser(), new RpcPortResolver.Impl(cluster), new PeerRowValidator());
         fetch.reloadData(logInvalidPeers);
@@ -511,15 +511,15 @@ class ControlConnection implements Connection.Owner {
             }
             if (!hostInfo.tokens.isEmpty())
                 tokenMap.put(host, hostInfo.tokens);
-            new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, hostInfo, isInitialConnection);
-            if (isNew && !isInitialConnection)
+            new HostUpdater(cluster.loadBalancingPolicy()).updateHost(host, hostInfo);
+            if (isNew)
                 cluster.triggerOnAdd(host);
         }
 
         Set<InetSocketAddress> foundHostsSet = fetch.getHostsAddresses();
         for (Host host : cluster.metadata.getAllHosts())
             if (!host.getSocketAddress().equals(connection.address) && !foundHostsSet.contains(host.getSocketAddress()))
-                cluster.removeHost(host, isInitialConnection);
+                cluster.removeHost(host);
 
         if (metadataEnabled)
             cluster.metadata.rebuildTokenMap(clusterInfo == null ? null : clusterInfo.partitioner, tokenMap);

@@ -51,7 +51,7 @@ public class Policies {
                      AddressTranslator addressTranslator,
                      TimestampGenerator timestampGenerator,
                      SpeculativeExecutionPolicy speculativeExecutionPolicy) {
-        this.loadBalancingPolicy = loadBalancingPolicy;
+        this.loadBalancingPolicy = new LoadBalancingPolicyWrapper(loadBalancingPolicy);
         this.reconnectionPolicy = reconnectionPolicy;
         this.retryPolicy = retryPolicy;
         this.addressTranslator = addressTranslator;

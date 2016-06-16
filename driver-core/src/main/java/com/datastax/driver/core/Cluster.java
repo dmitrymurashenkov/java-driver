@@ -1943,7 +1943,7 @@ public class Cluster implements Closeable {
         }
 
         public ListenableFuture<?> triggerOnAdd(final Host host) {
-            if (!isClosed()) {
+            if (!isClosed() && isFullyInit) {
                 return executor.submit(new ExceptionCatchingRunnable() {
                     @Override
                     public void runMayThrow() throws InterruptedException, ExecutionException {
@@ -2101,12 +2101,12 @@ public class Cluster implements Closeable {
             triggerOnDown(host, isHostAddition, true);
         }
 
-        public void removeHost(Host host, boolean isInitialConnection) {
+        public void removeHost(Host host) {
             if (host == null)
                 return;
 
             if (metadata.remove(host)) {
-                if (isInitialConnection) {
+                if (!isFullyInit) {
                     logger.warn("You listed {} in your contact points, but it wasn't found in the control host's system.peers at startup", host);
                 } else {
                     logger.info("Cassandra host {} removed", host);

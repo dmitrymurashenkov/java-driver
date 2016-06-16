@@ -25,8 +25,8 @@ class HostUpdater {
         this.loadBalancingPolicy = loadBalancingPolicy;
     }
 
-    void updateHost(Host host, HostInfo hostInfo, boolean isInitialConnection) {
-        updateLocationInfo(host, hostInfo.datacenter, hostInfo.rack, isInitialConnection);
+    void updateHost(Host host, HostInfo hostInfo) {
+        updateLocationInfo(host, hostInfo.datacenter, hostInfo.rack);
         host.setVersion(hostInfo.version);
         host.setBroadcastAddress(hostInfo.broadcastAddress);
         host.setListenAddress(hostInfo.listenAddress);
@@ -35,19 +35,15 @@ class HostUpdater {
         host.setDseGraphEnabled(hostInfo.isDseGraphEnabled);
     }
 
-    private void updateLocationInfo(Host host, String datacenter, String rack, boolean isInitialConnection) {
+    private void updateLocationInfo(Host host, String datacenter, String rack) {
         if (Objects.equal(host.getDatacenter(), datacenter) && Objects.equal(host.getRack(), rack))
             return;
 
         // If the dc/rack information changes for an existing node, we need to update the load balancing policy.
         // For that, we remove and re-add the node against the policy. Not the most elegant, and assumes
         // that the policy will update correctly, but in practice this should work.
-        if (!isInitialConnection)
-            loadBalancingPolicy.onDown(host);
+        loadBalancingPolicy.onDown(host);
         host.setLocationInfo(datacenter, rack);
-        //todo onDown/onAdd pair? meant to be onremove/onAdd maybe?
-        //todo get rid from isInitialConnection check somehow - seems we are not expected to call LBP.onAdd here if this is initial connect
-        if (!isInitialConnection)
-            loadBalancingPolicy.onAdd(host);
+        loadBalancingPolicy.onAdd(host);
     }
 }
